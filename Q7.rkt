@@ -1,8 +1,11 @@
 #lang racket
+(define totaltable (make-hash))
+(define datatable (make-hash))
 (define psymboltable
   (make-hash))
-(define test-prog
-  '((label LOOP-TOP)        ; loop-top:
+(define test-prog1
+  '((label LOOP-TOP)
+    (lit 3); loop-top:
     (gt TMP1 X 0)           ;  tmp1 <- (x > 0)
     (branch TMP1 LOOP-CONT) ;  if tmp1 goto loop-cont
     (jump LOOP-DONE)        ;  goto loop-done
@@ -14,14 +17,15 @@
     (jump LOOP-TOP)         ;  goto loop-top
     (label LOOP-DONE)       ; loop-done:
     (halt)                  ;  halt
-    (data X 10)
+    (data X (10 Y))
     (data Y 1)
     (data TMP1 0)
     ))
+(define test-prog '((const X 1) (data Y (10 X))))
 (define a '((const A B)
             (const B C)
             ))
-(define c '((const A B) (const A E)(const B C) (const E F)(const C 2)(const F 5)))
+(define c '((const A B) (const D E)(const B C) (const E F)(const C 2)(const F 5)))
 (define d '((const A B) (const D E)(const B C) (const E F)(const C 2)(const F D)))
 (define pc 0)
 
@@ -30,22 +34,28 @@
   (cond
     [(empty? inst) empty]
     [(symbol=? (first (first inst)) 'label)
-     (if (hash-has-key? psymboltable (second (first inst)))
+     (if (or (hash-has-key? datatable (second (first inst)))
+             (hash-has-key? psymboltable (second (first inst))))
          (error "duplicate")
          (begin
            (hash-set! psymboltable (second (first inst)) pc)
+           (hash-set! totaltable (second (first inst)) pc)
            (first-phase (rest inst))))]
     [(symbol=? (first (first inst)) 'const)
-     (if (hash-has-key? psymboltable (second (first inst)))
+     (if (or (hash-has-key? datatable (second (first inst)))
+             (hash-has-key? psymboltable (second (first inst))))
          (error "duplicate")
          (begin
            (hash-set! psymboltable (second (first inst)) (third (first inst)))
+           (hash-set! totaltable (second (first inst)) (third (first inst)))
            (first-phase (rest inst))))]
     [(symbol=? (first (first inst)) 'data)
-     (if (hash-has-key? psymboltable (second (first inst)))
+     (if (or (hash-has-key? datatable (second (first inst)))
+             (hash-has-key? psymboltable (second (first inst))))
          (error "duplicate")
          (begin
-           (hash-set! psymboltable (second (first inst)) pc)
+           (hash-set! datatable (second (first inst)) pc)
+           (hash-set! totaltable (second (first inst)) pc)
            (cond
              [(list? (third (first inst)))
               (set-data-abbr (first (third (first inst)))
@@ -54,13 +64,15 @@
               (set-data (rest (rest (first inst))))])
            (first-phase (rest inst))))]
     [else
+     (set! pc (+ pc 1))
      (first-phase (rest inst))]))
 
 (define (set-data datalst)
   (cond
     [(empty? datalst) empty]
     [else
-     (hash-set! psymboltable pc (first datalst))
+     (hash-set! datatable pc (first datalst))
+     (hash-set! totaltable pc (first datalst))
      (set! pc (add1 pc))
      (set-data (rest datalst))]))
 
@@ -68,53 +80,58 @@
   (cond
     [(zero? times) empty]
     [else
-     (hash-set! psymboltable pc data)
+     (hash-set! datatable pc data)
+     (hash-set! totaltable pc data)
      (set! pc (add1 pc))
      (set-data-abbr  (sub1 times) data)]))
 ;; Tests for first phase here
-(first-phase a)
-psymboltable
+(first-phase test-prog)
+;psymboltable
+;datatable
 ;; ====================== Second Phase ========================
 ;; in second phase, we are going to resovle any psymbols
 (define (second-phase psymbolhashtable)
-  (second-phase-h (hash->list psymbolhashtable)))
+  (void (second-phase-h (hash->list psymbolhashtable) psymbolhashtable)))
 
 
-(define (second-phase-h psymbollst)
+(define (second-phase-h psymbollst table)
+  
   (cond
     [(empty? psymbollst) empty]
     [(and (symbol? (car (first psymbollst)))
           (symbol? (cdr (first psymbollst))))
-     (search-sym (cdr (first psymbollst)) (set (car (first psymbollst))))
-     (second-phase-h (cdr psymbollst))]
+     (search-sym (cdr (first psymbollst)) (set (car (first psymbollst))) table)
+     (second-phase-h (cdr psymbollst) table)]
     [(and (number? (car (first psymbollst)))
           (symbol? (cdr (first psymbollst))))
-     (search-sym (cdr (first psymbollst)) (set))
-     (hash-set! psymboltable (car (first psymbollst))
-                (hash-ref psymboltable (cdr (first psymbollst))))
-     (second-phase-h (cdr psymbollst))]
+     (search-sym (cdr (first psymbollst)) (set) table)
+     (hash-set! table (car (first psymbollst))
+                (hash-ref table (cdr (first psymbollst))))
+     (second-phase-h (cdr psymbollst) table)]
     [else
-     (second-phase-h (cdr psymbollst))]))
+     (second-phase-h (cdr psymbollst) table)]))
 
-(define (search-sym sym localset)
-  (define sym-cont (hash-ref psymboltable sym (λ() (error "undefined"))))
+(define (search-sym sym localset table)
+  (define sym-cont (hash-ref totaltable sym (λ() (error "undefined"))))
+  (display sym-cont)
   (cond
     [(set-member? localset sym) (error "circular")]
     [(symbol? sym-cont)
      (search-sym sym-cont (set-add localset sym))]
     [else
-     (sets-all-syms (set->list (set-add localset sym)) sym-cont)]))
+     (sets-all-syms (set->list (set-add localset sym)) sym-cont table)]))
 
-(define (sets-all-syms setlst data)
+(define (sets-all-syms setlst data table)
   (cond
     [(empty? setlst) empty]
     [else
-     (hash-set! psymboltable (first setlst) data)
-     (sets-all-syms (rest setlst) data)]))
+     (hash-set! table (first setlst) data)
+     (sets-all-syms (rest setlst) data table)]))
 
 (second-phase psymboltable)
+(second-phase datatable)
 psymboltable
-
+datatable
 ;; ==================  Final Phase ==========================
 (define (find-in-hash data)
   (cond
@@ -122,31 +139,60 @@ psymboltable
     [(list? data) data]
     [else
      (hash-ref psymboltable data)]))
-(define (third-phase primp-prog)
-  (if (empty? primp-prog) empty
-  (match (first primp-prog)
-      [`(add,dest,opd1,opd2)
-       (cons (list 'add
-                   (find-in-hash dest)
-                   (find-in-hash opd1)
-                   (find-in-hash opd2))
-             (third-phase (rest primp-prog)))]
-    [`(sub,dest,opd1,opd2)
-       (define _dest dest)
-       (define _opd1 opd1)
-       (define _opd2 opd2)
-       (cond
-         [(symbol? _dest) (set! _dest (hash-ref psymboltable _dest))]
-         [(symbol? _opd1) (set! _opd1 (hash-ref psymboltable _opd1))]
-         [(symbol? _opd2) (set! _opd2 (hash-ref psymboltable _opd2))])
-       
-       (cons (list 'sub _dest _opd1 _opd2)
-             (third-phase (rest primp-prog)))]
-    
-    [x
-     x
-     (third-phase (rest primp-prog))])))
-;;(third-phase test-prog)
+(define (third-phase prog lens)
+  (cond
+    [(empty? prog)
+     empty]
+    [else
+     (define curinst (first prog))
+     (cond
+       [(or (symbol=? (first curinst) 'label)
+            (symbol=? (first curinst) 'const)
+            (symbol=? (first curinst) 'data)
+            )
+        (third-phase (rest prog) lens)]
+       [(symbol=? (first curinst) 'lit)
+        (cons (second curinst)
+        (third-phase (rest prog) (add1 lens)))]
+       [(symbol=? (first curinst) 'halt)
+        (cons 0
+        (third-phase (rest prog) (add1 lens)))]
+       [else
+        (cons (cons (first curinst)
+                    (replace (rest curinst)))
+              (third-phase (rest prog) (add1 lens)))]
+        )]))
 
+(define (replace inst)
+  (cond
+    [(empty? inst) empty]
+    [(hash-has-key? psymboltable (first inst))
      
+     (cons (hash-ref psymboltable (first inst))
+           (replace (rest inst)))]
+    [(hash-has-key? datatable (first inst))
+     (cons (list (hash-ref datatable (first inst)))
+           (replace (rest inst)))]
+    [else
+     (cons (first inst)
+           (replace (rest inst)))]))
+
+(define (datas lens)
+  (cond
+    [(hash-has-key? datatable lens)
+     (cons (hash-ref datatable lens)
+           (datas (add1 lens)))]
+    [else
+     empty]))
+  
+;(third-phase test-prog 0)
+
+(define (primp-assemble prog)
+  (begin
+    (first-phase prog)
+    (second-phase psymboltable)
+    (second-phase datatable)
+    (third-phase prog 0)))
+
+;;(primp-assemble test-prog)
      
