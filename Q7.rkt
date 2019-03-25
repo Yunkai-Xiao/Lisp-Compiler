@@ -1,198 +1,364 @@
 #lang racket
-(define totaltable (make-hash))
 (define datatable (make-hash))
-(define psymboltable
-  (make-hash))
-(define test-prog1
-  '((label LOOP-TOP)
-    (lit 3); loop-top:
-    (gt TMP1 X 0)           ;  tmp1 <- (x > 0)
-    (branch TMP1 LOOP-CONT) ;  if tmp1 goto loop-cont
-    (jump LOOP-DONE)        ;  goto loop-done
-    (label LOOP-CONT)       ; loop-cont:
-    (mul Y 2 Y)             ;  y <- 2 * y
-    (sub X X 1)             ;  x <- x - 1
-    (print-val Y)           ;  print y
-    (print-string "\n")     ;  print "\n"
-    (jump LOOP-TOP)         ;  goto loop-top
-    (label LOOP-DONE)       ; loop-done:
-    (halt)                  ;  halt
-    (data X (10 Y))
-    (data Y 1)
-    (data TMP1 0)
-    ))
-(define test-prog '((const X 1) (data Y (10 X))))
-(define a '((const A B)
-            (const B C)
-            ))
-(define c '((const A B) (const D E)(const B C) (const E F)(const C 2)(const F 5)))
-(define d '((const A B) (const D E)(const B C) (const E F)(const C 2)(const F D)))
-(define pc 0)
+(define consttable (make-hash))
+(define labeltable (make-hash))
+(define totaltable (make-hash))
 
-(define (first-phase inst)
-   
+(define ptr 0)
+(define (first-phase prog)
   (cond
-    [(empty? inst) empty]
-    [(symbol=? (first (first inst)) 'label)
-     (if (or (hash-has-key? datatable (second (first inst)))
-             (hash-has-key? psymboltable (second (first inst))))
-         (error "duplicate")
-         (begin
-           (hash-set! psymboltable (second (first inst)) pc)
-           (hash-set! totaltable (second (first inst)) pc)
-           (first-phase (rest inst))))]
-    [(symbol=? (first (first inst)) 'const)
-     (if (or (hash-has-key? datatable (second (first inst)))
-             (hash-has-key? psymboltable (second (first inst))))
-         (error "duplicate")
-         (begin
-           (hash-set! psymboltable (second (first inst)) (third (first inst)))
-           (hash-set! totaltable (second (first inst)) (third (first inst)))
-           (first-phase (rest inst))))]
-    [(symbol=? (first (first inst)) 'data)
-     (if (or (hash-has-key? datatable (second (first inst)))
-             (hash-has-key? psymboltable (second (first inst))))
-         (error "duplicate")
-         (begin
-           (hash-set! datatable (second (first inst)) pc)
-           (hash-set! totaltable (second (first inst)) pc)
-           (cond
-             [(list? (third (first inst)))
-              (set-data-abbr (first (third (first inst)))
-                             (second (third (first inst))))]
-             [else
-              (set-data (rest (rest (first inst))))])
-           (first-phase (rest inst))))]
+    [(empty? prog) empty]
     [else
-     (set! pc (+ pc 1))
-     (first-phase (rest inst))]))
+     
+     (define curinst (first prog))
+     
+     (cond
+       [(not (list? curinst))
+        (set! ptr (+ 1 ptr))
+        (first-phase (rest prog))]
+       [(equal? (first curinst) 'label)
+        (if (hash-has-key? totaltable (second curinst)) (error "duplicate")
+            (begin (hash-set! labeltable (second curinst) ptr)
+                   (hash-set! totaltable (second curinst) ptr)
+                   (first-phase (rest prog))))]
+       [(equal? (first curinst) 'const)
+        (if (hash-has-key? totaltable (second curinst)) (error "duplicate")
+            (begin
+              (hash-set! consttable (second curinst) (third curinst))
+              (hash-set! totaltable (second curinst) (third curinst))
+              (first-phase (rest prog))))]
+       [(equal? (first curinst) 'data)
+        (if (hash-has-key? totaltable (second curinst)) (error "duplicate")
+            (begin
+              (hash-set! datatable (second curinst) ptr)
+              (hash-set! totaltable (second curinst) ptr)
+              (if (list? (third curinst))
+                  (data-add-abbr (first (third curinst)) (second (third curinst)))
+                  (data-add (rest (rest curinst))))
+              (first-phase (rest prog))))]
+       [else
+        (set! ptr (+ 1 ptr))
+        (first-phase (rest prog))])]))
+(define (data-add datas)
+  (cond
+    [(empty? datas) void]
+    [else
+     (hash-set! datatable ptr (first datas))
+     (hash-set! totaltable ptr (first datas))
+     (set! ptr (+ 1 ptr))
+     (data-add (rest datas))]))
+(define (data-add-abbr times data)
+  (cond
+    [(zero? times) void]
+    [else
+     (hash-set! datatable ptr data)
+     (hash-set! totaltable ptr data)
+     (set! ptr (+ 1 ptr))
+     (data-add-abbr (sub1 times) data)]))
+        
 
-(define (set-data datalst)
+
+
+;; Tests for first phase here
+(define (first-phase-test prog)
+  (first-phase prog)
+  (display "LabelTable: ")
+  (display labeltable)
+  (newline)
+  (display "consttable: ")
+  (display consttable)
+  (newline)
+  (display "datatable: ")
+  (display datatable)
+  (newline)
+  (display "totaltable: ")
+  (display totaltable)
+  (newline))
+  
+;(first-phase-test test-prog)
+
+;; ====================== Second Phase ========================
+;; in second phase, we are going to resovle any psymbols
+(define (resolve-const)
+  (resolve-const-h (hash->list consttable)))
+
+(define (resolve-const-h constlst)
+  (cond
+    [(empty? constlst) void]
+    [(symbol? (cdr (first constlst)))
+     (set-sym-const (cdr (first constlst)) (set (car (first constlst))))
+     (resolve-const-h (rest constlst))]
+    [else
+     (resolve-const-h (rest constlst))]))
+(define (set-sym-const sym set)
+  (define key (hash-ref totaltable sym (λ() (error "undefined"))))
+  (cond
+    [(set-member? set key) (error "circular")]
+    [(symbol? key)
+     (set-sym-const key (set-add set key))]
+    [else
+     (set-all (set->list set) key)]))
+
+
+(define (set-all setlst key)
+  (cond
+    [(empty? setlst)
+     empty]
+    [(hash-has-key? consttable (first setlst))
+     (hash-set! consttable (first setlst) key)
+     (hash-set! totaltable (first setlst) key)
+     (set-all (rest setlst) key)]
+    [else
+     (set-all (rest setlst) key)]))
+
+(define (resolve-data)
+  (resolve-data-h (hash->list datatable)))
+(define (resolve-data-h datalst)
   (cond
     [(empty? datalst) empty]
     [else
-     (hash-set! datatable pc (first datalst))
-     (hash-set! totaltable pc (first datalst))
-     (set! pc (add1 pc))
-     (set-data (rest datalst))]))
+     (define datpair (first datalst))
+     (cond
+       [(symbol? (cdr datpair))
+        (hash-set! datatable (car datpair) (hash-ref totaltable (cdr datpair)
+                                                     (λ() (error "undefined"))))
+        (hash-set! totaltable (car datpair) (hash-ref totaltable (cdr datpair)
+                                                      (λ() (error "undefined"))))
+        (resolve-data-h (rest datalst))]
+       [else
+        (resolve-data-h (rest datalst))])]))
+(define (second-phase-test)
+  (resolve-const)
+  (resolve-data)
+  (display "LabelTable: ")
+  (display labeltable)
+  (newline)
+  (display "consttable: ")
+  (display consttable)
+  (newline)
+  (display "datatable: ")
+  (display datatable)
+  (newline)
+  (display "totaltable: ")
+  (display totaltable)
+  (newline))
 
-(define (set-data-abbr times data)
+(define (second-phase)
+  (resolve-const)
+  (resolve-data))
+
+
+(define (data? key)
+  (hash-has-key? datatable key))
+(define (label? key)
+  (hash-has-key? labeltable key))
+(define (const? key)
+  (hash-has-key? consttable key))
+
+(define (resolve-imm imm)
+  (cond
+    [(not (symbol? imm)) imm]
+    [(label? imm) (error "incorrect")]
+    [(data? imm) (hash-ref totaltable imm (λ() (error "undefined")))]
+    [(const? imm)(hash-ref totaltable imm (λ() (error "undefined")))]))
+(define (resolve-ind ind)
+  (cond
+    [(not (symbol? ind)) ind]
+    [(label? ind) (error "incorrect")]
+    [(const? ind) (error "incorrect")]
+    [(data? ind) (list (hash-ref totaltable ind (λ() (error "undefined"))))]))
+
+(define (resolve-dest dest)
+     (match dest
+       [(list a b) (list (resolve-imm a) (resolve-ind b))]
+       [a (if (symbol? a) (resolve-ind a) a)]))
+
+(define (resolve-opd opd)
+  (cond
+    [(symbol? opd)
+     (cond
+       [(data? opd) (list (hash-ref totaltable opd (λ() (error "undefined"))))]
+       [(label? opd) (error "incorrect")]
+       [(const? opd) (hash-ref totaltable opd (λ() (error "undefined")))])]
+    [else
+     (match opd
+       [(list a b) (list (resolve-imm a) (resolve-ind b))]
+       [a a])]))
+
+(define (resolve-opd-jb opd)
+  (cond
+    [(symbol? opd)
+     (cond
+       [(data? opd) (list (hash-ref totaltable opd (λ() (error "undefined"))))]
+       [(label? opd) (hash-ref totaltable opd (λ() (error "undefined")))]
+       [(const? opd) (list (hash-ref totaltable opd (λ() (error "undefined"))))])]
+    [else
+     (match opd
+       [(list a b) (list (resolve-imm a) (resolve-ind b))]
+       [a a])]))
+(define (resolve-psym psym)
+  (cond
+    [(symbol? psym)
+     (hash-ref totaltable psym (λ() (error "undefined")))]
+    [else
+     psym]))
+      
+    
+
+(define (change-table test-prog)
+  (cond
+    [(empty? test-prog) empty]
+    [else
+     (match (first test-prog)
+       [`(add,dest,opd1,opd2)
+        (cons (list 'add
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(sub,dest,opd1,opd2)
+        (cons (list 'sub
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(mul,dest,opd1,opd2)
+        (cons (list 'mul
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(div,dest,opd1,opd2)
+        (cons (list 'div
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(mod,dest,opd1,opd2)
+        (cons (list 'mod
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(gt,dest,opd1,opd2)
+        (cons (list 'gt
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(ge,dest,opd1,opd2)
+        (cons (list 'ge
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(lt,dest,opd1,opd2)
+        (cons (list 'lt
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(le,dest,opd1,opd2)
+        (cons (list 'le
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(equal,dest,opd1,opd2)
+        (cons (list 'equal
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(not-equal,dest,opd1,opd2)
+        (cons (list 'not-equal
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(land,dest,opd1,opd2)
+        (cons (list 'land
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(lor,dest,opd1,opd2)
+        (cons (list 'lor
+                    (resolve-dest dest)
+                    (resolve-opd opd1)
+                    (resolve-opd opd2))
+              (change-table (rest test-prog)))]
+       [`(lnot,dest,opd1)
+        (cons (list 'lnot
+                    (resolve-dest dest)
+                    (resolve-opd opd1))
+              (change-table (rest test-prog)))]
+       [`(jump,opd)
+        (cons (list 'jump
+                    (resolve-opd-jb opd))
+              (change-table (rest test-prog)))]
+       [`(branch,opd1,opd2)
+        (cons (list 'branch
+                    (resolve-opd opd1)
+                    (resolve-opd-jb opd2))
+              (change-table (rest test-prog)))]
+       [`(move,dest,opd)
+        (cons (list 'move
+                    (resolve-dest dest)
+                    (resolve-opd opd))
+              (change-table (rest test-prog)))]
+       [`(print-val,opd)
+        (cons (list 'print-val
+                    (resolve-opd opd))
+              (change-table (rest test-prog)))]
+       [`(print-string,str)
+        (cons (first test-prog)
+              (change-table (rest test-prog)))]
+       [`(halt) (cons 0 (change-table (rest test-prog)))]
+       [`(lit,a) (cons (resolve-psym a)
+                       (change-table (rest test-prog)))]
+       [`(const,psym, a) (change-table (rest test-prog))]
+       [`(data,psym,(list a b))
+        (append (data-abbr a (resolve-psym b))
+                (change-table (rest test-prog)))]
+       [`(data,psym,vals ...)
+        (append (datas vals)
+                (change-table (rest test-prog)))]
+       [`(label,psym)
+        (change-table (rest test-prog))]
+       [x (resolve-psym x)])]))
+
+(define (data-abbr times data)
   (cond
     [(zero? times) empty]
     [else
-     (hash-set! datatable pc data)
-     (hash-set! totaltable pc data)
-     (set! pc (add1 pc))
-     (set-data-abbr  (sub1 times) data)]))
-;; Tests for first phase here
-(first-phase test-prog)
-;psymboltable
-;datatable
-;; ====================== Second Phase ========================
-;; in second phase, we are going to resovle any psymbols
-(define (second-phase psymbolhashtable)
-  (void (second-phase-h (hash->list psymbolhashtable) psymbolhashtable)))
-
-
-(define (second-phase-h psymbollst table)
-  
+     (cons data (data-abbr (sub1 times) data))]))
+(define (datas vals)
   (cond
-    [(empty? psymbollst) empty]
-    [(and (symbol? (car (first psymbollst)))
-          (symbol? (cdr (first psymbollst))))
-     (search-sym (cdr (first psymbollst)) (set (car (first psymbollst))) table)
-     (second-phase-h (cdr psymbollst) table)]
-    [(and (number? (car (first psymbollst)))
-          (symbol? (cdr (first psymbollst))))
-     (search-sym (cdr (first psymbollst)) (set) table)
-     (hash-set! table (car (first psymbollst))
-                (hash-ref table (cdr (first psymbollst))))
-     (second-phase-h (cdr psymbollst) table)]
-    [else
-     (second-phase-h (cdr psymbollst) table)]))
-
-(define (search-sym sym localset table)
-  (define sym-cont (hash-ref totaltable sym (λ() (error "undefined"))))
-  (display sym-cont)
-  (cond
-    [(set-member? localset sym) (error "circular")]
-    [(symbol? sym-cont)
-     (search-sym sym-cont (set-add localset sym))]
-    [else
-     (sets-all-syms (set->list (set-add localset sym)) sym-cont table)]))
-
-(define (sets-all-syms setlst data table)
-  (cond
-    [(empty? setlst) empty]
-    [else
-     (hash-set! table (first setlst) data)
-     (sets-all-syms (rest setlst) data table)]))
-
-(second-phase psymboltable)
-(second-phase datatable)
-psymboltable
-datatable
-;; ==================  Final Phase ==========================
-(define (find-in-hash data)
-  (cond
-    [(number? data) data]
-    [(list? data) data]
-    [else
-     (hash-ref psymboltable data)]))
-(define (third-phase prog lens)
-  (cond
-    [(empty? prog)
+    [(empty? vals)
      empty]
     [else
-     (define curinst (first prog))
-     (cond
-       [(or (symbol=? (first curinst) 'label)
-            (symbol=? (first curinst) 'const)
-            (symbol=? (first curinst) 'data)
-            )
-        (third-phase (rest prog) lens)]
-       [(symbol=? (first curinst) 'lit)
-        (cons (second curinst)
-        (third-phase (rest prog) (add1 lens)))]
-       [(symbol=? (first curinst) 'halt)
-        (cons 0
-        (third-phase (rest prog) (add1 lens)))]
-       [else
-        (cons (cons (first curinst)
-                    (replace (rest curinst)))
-              (third-phase (rest prog) (add1 lens)))]
-        )]))
-
-(define (replace inst)
-  (cond
-    [(empty? inst) empty]
-    [(hash-has-key? psymboltable (first inst))
-     
-     (cons (hash-ref psymboltable (first inst))
-           (replace (rest inst)))]
-    [(hash-has-key? datatable (first inst))
-     (cons (list (hash-ref datatable (first inst)))
-           (replace (rest inst)))]
-    [else
-     (cons (first inst)
-           (replace (rest inst)))]))
-
-(define (datas lens)
-  (cond
-    [(hash-has-key? datatable lens)
-     (cons (hash-ref datatable lens)
-           (datas (add1 lens)))]
-    [else
-     empty]))
-  
-;(third-phase test-prog 0)
-
-(define (primp-assemble prog)
-  (begin
-    (first-phase prog)
-    (second-phase psymboltable)
-    (second-phase datatable)
-    (third-phase prog 0)))
-
-;;(primp-assemble test-prog)
+     (cons (resolve-psym (first vals))
+           (datas (rest vals)))]))
+(define test-prog
+  '(
+(label LOOP-TOP)        ; loop-top:
+(gt TMP1 X 0)           ;  tmp1 <- (x > 0)
+(branch TMP1 LOOP-CONT) ;  if tmp1 goto loop-cont
+(jump LOOP-DONE)        ;  goto loop-done
+(label LOOP-CONT)       ; loop-cont:
+(mul Y 2 Y)             ;  y <- 2 * y
+(sub X X 1)             ;  x <- x - 1
+(print-val Y)           ;  print y
+(print-string "\n")     ;  print "\n"
+(jump LOOP-TOP)         ;  goto loop-top
+(label LOOP-DONE)       ; loop-done:
+(halt)                  ;  halt
+(data X 10)
+(data Y 1)
+(data TMP1 0)))
+(define (primp-assemble test-prog)
+  (first-phase test-prog)
+  (second-phase)
+  (change-table test-prog))
      
